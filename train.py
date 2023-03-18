@@ -16,20 +16,20 @@ from model import Glow
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 parser = argparse.ArgumentParser(description="Glow trainer")
-parser.add_argument("--batch", default=16, type=int, help="batch size")
+parser.add_argument("--batch", default=8, type=int, help="batch size")
 parser.add_argument("--iter", default=200000, type=int, help="maximum iterations")
 parser.add_argument(
     "--n_flow", default=32, type=int, help="number of flows in each block"
-)
-parser.add_argument("--n_block", default=4, type=int, help="number of blocks")
+)  #论文中的K
+parser.add_argument("--n_block", default=4, type=int, help="number of blocks") #论文中的L
 parser.add_argument(
     "--no_lu",
     action="store_true",
     help="use plain convolution instead of LU decomposed version",
-)
+) #在Invertible 1 × 1 convolution中，是否使用LU分解计算对数行列式
 parser.add_argument(
     "--affine", action="store_true", help="use affine coupling instead of additive"
-)
+) #在Affine Coupling Layers中，选择使用一般的Affine Coupling，还是使用additive coupling layer
 parser.add_argument("--n_bits", default=5, type=int, help="number of bits")
 parser.add_argument("--lr", default=1e-4, type=float, help="learning rate")
 parser.add_argument("--img_size", default=64, type=int, help="image size")
@@ -43,13 +43,13 @@ def sample_data(path, batch_size, image_size):
         [
             transforms.Resize(image_size),
             transforms.CenterCrop(image_size),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
+            transforms.RandomHorizontalFlip(), #依概率p水平翻转(默认概率p=0.5)
+            transforms.ToTensor(), #将原始的PILImage格式或者numpy.array格式的数据格式化为可被pytorch快速处理的张量类型
         ]
     )
 
     dataset = datasets.ImageFolder(path, transform=transform)
-    loader = DataLoader(dataset, shuffle=True, batch_size=batch_size, num_workers=4)
+    loader = DataLoader(dataset, shuffle=True, batch_size=batch_size, num_workers=4) #num_worker设置得大，好处是寻batch速度快，坏处是内存开销大
     loader = iter(loader)
 
     while True:
@@ -83,11 +83,11 @@ def calc_loss(log_p, logdet, image_size, n_bins):
     # log_p = calc_log_p([z_list])
     n_pixel = image_size * image_size * 3
 
-    loss = -log(n_bins) * n_pixel
+    loss = -log(n_bins) * n_pixel  #添加的均匀噪声的似然函数
     loss = loss + logdet + log_p
 
     return (
-        (-loss / (log(2) * n_pixel)).mean(),
+        (-loss / (log(2) * n_pixel)).mean(),  #除以log(2)是因为转化为bit,除以n_pixel是排除图片大小的影响，最后单位为bit/pixel
         (log_p / (log(2) * n_pixel)).mean(),
         (logdet / (log(2) * n_pixel)).mean(),
     )
@@ -110,16 +110,16 @@ def train(args, model, optimizer):
 
             image = image * 255
 
-            if args.n_bits < 8:
+            if args.n_bits < 8:  #量化
                 image = torch.floor(image / 2 ** (8 - args.n_bits))
 
             image = image / n_bins - 0.5
 
-            if i == 0:
+            if i == 0:  #第一步不进行梯度更新，因为要进行数据依赖的初始化
                 with torch.no_grad():
                     log_p, logdet, _ = model.module(
                         image + torch.rand_like(image) / n_bins
-                    )
+                    )  #输入的图像数据添加了均匀噪声，强度为1/n_bins
 
                     continue
 

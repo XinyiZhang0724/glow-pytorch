@@ -12,13 +12,14 @@ class ActNorm(nn.Module):
     def __init__(self, in_channel, logdet=True):
         super().__init__()
 
-        self.loc = nn.Parameter(torch.zeros(1, in_channel, 1, 1))
-        self.scale = nn.Parameter(torch.ones(1, in_channel, 1, 1))
+        # nn.Parameter()声明是要优化的参数
+        self.loc = nn.Parameter(torch.zeros(1, in_channel, 1, 1))  #论文Table1：ActNorm中的b
+        self.scale = nn.Parameter(torch.ones(1, in_channel, 1, 1)) #论文Table1：ActNorm中的s
 
-        self.register_buffer("initialized", torch.tensor(0, dtype=torch.uint8))
+        self.register_buffer("initialized", torch.tensor(0, dtype=torch.uint8)) #标志位，如果输入数据已经进行了初始化，则置为1
         self.logdet = logdet
 
-    def initialize(self, input):
+    def initialize(self, input):  #对b和s进行初始化：计算第一批数据的均值和方差
         with torch.no_grad():
             flatten = input.permute(1, 0, 2, 3).contiguous().view(input.shape[1], -1)
             mean = (
@@ -35,14 +36,16 @@ class ActNorm(nn.Module):
                 .unsqueeze(3)
                 .permute(1, 0, 2, 3)
             )
-
+            ## 也可以这么计算第一批数据的均值和方差：
+            ## mean = torch.mean(input,(0,2,3),keepdim = True)
+            ## std = torch.sd(input,(0,2,3),keepdim = True)
             self.loc.data.copy_(-mean)
             self.scale.data.copy_(1 / (std + 1e-6))
 
-    def forward(self, input):
+    def forward(self, input):  #input的维度：batch size*channel*h*w
         _, _, height, width = input.shape
 
-        if self.initialized.item() == 0:
+        if self.initialized.item() == 0:  #初始化只对第一批数据进行，以稳定数据收敛
             self.initialize(input)
             self.initialized.fill_(1)
 
@@ -65,8 +68,8 @@ class InvConv2d(nn.Module):
         super().__init__()
 
         weight = torch.randn(in_channel, in_channel)
-        q, _ = torch.qr(weight)
-        weight = q.unsqueeze(2).unsqueeze(3)
+        q, _ = torch.qr(weight) #对矩阵进行QR分解，保证矩阵的行列式不为0(正交矩阵Q的行列式为±1)，在Reverse中可逆
+        weight = q.unsqueeze(2).unsqueeze(3) #将weight的维度变为(in_channel,in_channel,1,1)
         self.weight = nn.Parameter(weight)
 
     def forward(self, input):
@@ -75,7 +78,7 @@ class InvConv2d(nn.Module):
         out = F.conv2d(input, self.weight)
         logdet = (
             height * width * torch.slogdet(self.weight.squeeze().double())[1].float()
-        )
+        ) # torch.slogdet = log(|det(W)|)
 
         return out, logdet
 
@@ -85,7 +88,7 @@ class InvConv2d(nn.Module):
         )
 
 
-class InvConv2dLU(nn.Module):
+class InvConv2dLU(nn.Module): #使用LU分解加速InvConv2d的行列式计算
     def __init__(self, in_channel):
         super().__init__()
 
@@ -93,7 +96,7 @@ class InvConv2dLU(nn.Module):
         q, _ = la.qr(weight)
         w_p, w_l, w_u = la.lu(q.astype(np.float32))
         w_s = np.diag(w_u)
-        w_u = np.triu(w_u, 1)
+        w_u = np.triu(w_u, 1) #上三角矩阵的对角线元素变为0
         u_mask = np.triu(np.ones_like(w_u), 1)
         l_mask = u_mask.T
 
@@ -102,10 +105,10 @@ class InvConv2dLU(nn.Module):
         w_s = torch.from_numpy(w_s)
         w_u = torch.from_numpy(w_u)
 
-        self.register_buffer("w_p", w_p)
+        self.register_buffer("w_p", w_p) #论文中说保持不变
         self.register_buffer("u_mask", torch.from_numpy(u_mask))
         self.register_buffer("l_mask", torch.from_numpy(l_mask))
-        self.register_buffer("s_sign", torch.sign(w_s))
+        self.register_buffer("s_sign", torch.sign(w_s)) #s的符号
         self.register_buffer("l_eye", torch.eye(l_mask.shape[0]))
         self.w_l = nn.Parameter(w_l)
         self.w_s = nn.Parameter(logabs(w_s))
@@ -141,14 +144,14 @@ class ZeroConv2d(nn.Module):
         super().__init__()
 
         self.conv = nn.Conv2d(in_channel, out_channel, 3, padding=0)
-        self.conv.weight.data.zero_()
+        self.conv.weight.data.zero_() #全零初始化
         self.conv.bias.data.zero_()
         self.scale = nn.Parameter(torch.zeros(1, out_channel, 1, 1))
 
     def forward(self, input):
         out = F.pad(input, [1, 1, 1, 1], value=1)
         out = self.conv(out)
-        out = out * torch.exp(self.scale * 3)
+        out = out * torch.exp(self.scale * 3)  #实践出来的，论文中未提及
 
         return out
 
@@ -174,12 +177,12 @@ class AffineCoupling(nn.Module):
         self.net[2].bias.data.zero_()
 
     def forward(self, input):
-        in_a, in_b = input.chunk(2, 1)
+        in_a, in_b = input.chunk(2, 1) #1表示在维度1上split,2表示split成2个
 
         if self.affine:
             log_s, t = self.net(in_a).chunk(2, 1)
             # s = torch.exp(log_s)
-            s = F.sigmoid(log_s + 2)
+            s = F.sigmoid(log_s + 2)  #sigmoid()更稳定训练
             # out_a = s * in_a + t
             out_b = (in_b + t) * s
 
@@ -256,7 +259,7 @@ class Block(nn.Module):
 
         squeeze_dim = in_channel * 4
 
-        self.flows = nn.ModuleList()
+        self.flows = nn.ModuleList()  #不能用self.flows = []
         for i in range(n_flow):
             self.flows.append(Flow(squeeze_dim, affine=affine, conv_lu=conv_lu))
 
